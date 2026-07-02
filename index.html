@@ -587,7 +587,7 @@ let ocrWorker = null;
 async function getOcrWorker() {
   // Tesseract.jsのワーカーは初回のみ作成し、以後は使い回す（毎回作り直すと遅い）
   if (!ocrWorker) {
-    ocrWorker = await Tesseract.createWorker('jpn+eng');
+    ocrWorker = await Tesseract.createWorker('jpn+jpn_vert+eng');
   }
   return ocrWorker;
 }
