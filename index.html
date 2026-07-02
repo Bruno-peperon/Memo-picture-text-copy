@@ -161,6 +161,29 @@
   }
   .settings-input:focus { outline: none; border-color: #007AFF; }
 
+  /* --- Review sheet (OCR結果の仕分け・選択) --- */
+  #reviewOverlay { z-index: 140; }
+  #reviewSheet { z-index: 150; }
+  .review-hint {
+    padding: 10px 16px; font-size: 12px; color: #6e6e73;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+  }
+  .review-list { flex: 1; overflow-y: auto; padding: 8px 0 24px; -webkit-overflow-scrolling: touch; }
+  .review-item {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: #fff; margin: 0 16px 10px; padding: 12px 14px;
+    border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    cursor: pointer;
+  }
+  .review-item input[type="checkbox"] {
+    flex-shrink: 0; width: 20px; height: 20px; margin-top: 1px; accent-color: #007AFF;
+  }
+  .review-item-text {
+    font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  }
+  .review-item.noise { opacity: 0.55; }
+  .review-item.noise .review-item-text { color: #6e6e73; }
+
   /* --- Photo attach (in sheet) --- */
   .photo-row {
     display: flex; align-items: center; gap: 10px;
@@ -264,15 +287,31 @@
   <div class="confirm-overlay" id="settingsOverlay">
     <div class="confirm-box settings-box">
       <div class="settings-body">
-        <div class="settings-title">文字認識の設定</div>
-        <div class="settings-desc">Google Cloud VisionのAPIキーを入力すると、写真からの文字認識精度が向上します。未入力の場合は無料のTesseract（標準）を使用します。キーはこの端末にのみ保存され、送信先はGoogleのみです。</div>
-        <input type="text" class="settings-input" id="ocrApiKeyInput" placeholder="APIキーを入力（任意）" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <div class="settings-title">文字認識・文章整理の設定</div>
+        <div class="settings-desc">Google Cloud VisionのAPIキーを入力すると、写真からの文字認識精度が向上します。未入力の場合は無料のTesseract（標準）を使用します。</div>
+        <input type="text" class="settings-input" id="ocrApiKeyInput" placeholder="Cloud Vision APIキー（任意）" autocapitalize="off" autocorrect="off" spellcheck="false">
+
+        <div class="settings-desc" style="margin-top:16px;">GeminiのAPIキーを入力すると、読み取った文字を「文章の塊」と「不要な断片」に自動で仕分けし、必要な部分だけ選んでメモに貼り付けられるようになります。未入力の場合は読み取った文字をそのまま挿入します。</div>
+        <input type="text" class="settings-input" id="geminiApiKeyInput" placeholder="Gemini APIキー（任意）" autocapitalize="off" autocorrect="off" spellcheck="false">
+
+        <div class="settings-desc" style="margin-top:12px;">キーはこの端末にのみ保存され、それぞれの発行元（Google）以外には送信されません。</div>
       </div>
       <div class="confirm-actions">
         <button class="confirm-btn cancel" id="settingsCancelBtn">キャンセル</button>
         <button class="confirm-btn affirmative" id="settingsSaveBtn">保存</button>
       </div>
     </div>
+  </div>
+
+  <div class="sheet-overlay" id="reviewOverlay"></div>
+  <div class="sheet" id="reviewSheet">
+    <div class="sheet-nav">
+      <button class="nav-text-btn" id="reviewCancelBtn">キャンセル</button>
+      <div class="sheet-title">残す部分を選択</div>
+      <button class="nav-text-btn bold" id="reviewPasteBtn">ペースト</button>
+    </div>
+    <div class="review-hint">文章の塊にはチェックが付いています。メモに残したい部分だけ選んで「ペースト」を押してください。</div>
+    <div class="review-list" id="reviewList"></div>
   </div>
 </div>
 
@@ -442,14 +481,26 @@ function setOcrApiKey(key) {
   else localStorage.removeItem(OCR_API_KEY_STORAGE_KEY);
 }
 
+/* GeminiのAPIキー。設定済みならOCR結果を「文章の塊」と「不要な断片」に仕分けする。 */
+const GEMINI_API_KEY_STORAGE_KEY = 'geminiApiKey';
+function getGeminiApiKey() {
+  return localStorage.getItem(GEMINI_API_KEY_STORAGE_KEY) || '';
+}
+function setGeminiApiKey(key) {
+  if (key) localStorage.setItem(GEMINI_API_KEY_STORAGE_KEY, key);
+  else localStorage.removeItem(GEMINI_API_KEY_STORAGE_KEY);
+}
+
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsOverlay = document.getElementById('settingsOverlay');
 const ocrApiKeyInput = document.getElementById('ocrApiKeyInput');
+const geminiApiKeyInput = document.getElementById('geminiApiKeyInput');
 const settingsCancelBtn = document.getElementById('settingsCancelBtn');
 const settingsSaveBtn = document.getElementById('settingsSaveBtn');
 
 function openSettings() {
   ocrApiKeyInput.value = getOcrApiKey();
+  geminiApiKeyInput.value = getGeminiApiKey();
   settingsOverlay.classList.add('show');
   setTimeout(() => ocrApiKeyInput.focus(), 200);
 }
@@ -461,6 +512,7 @@ settingsCancelBtn.addEventListener('click', closeSettings);
 settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
 settingsSaveBtn.addEventListener('click', () => {
   setOcrApiKey(ocrApiKeyInput.value.trim());
+  setGeminiApiKey(geminiApiKeyInput.value.trim());
   closeSettings();
   showToast('設定を保存しました');
 });
@@ -691,31 +743,140 @@ async function recognizeWithCloudVision(dataURL, apiKey) {
   return (json.responses[0].fullTextAnnotation && json.responses[0].fullTextAnnotation.text) || '';
 }
 
+async function recognizeText(dataURL) {
+  const apiKey = getOcrApiKey();
+  if (apiKey) {
+    return await recognizeWithCloudVision(dataURL, apiKey);
+  }
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(dataURL);
+  return data.text;
+}
+
+/**
+ * GeminiでOCR結果を「文章の塊」と「不要な断片」（ページ番号・ヘッダー等）に仕分けする。
+ * 原文の文字列は変えず、そのまま抜き出させる。
+ */
+async function segmentTextWithGemini(text, apiKey) {
+  const prompt = 'あなたはOCRで読み取ったテキストを整理するアシスタントです。'
+    + '以下の原文を、意味のあるまとまり（段落や文の塊）ごとに分割してください。'
+    + 'ページ番号・柱（ヘッダーやフッター）・OCRの誤読によるゴミ文字列など、メモとして残す価値がない断片も1つの要素として含めてください。'
+    + '原文の文字列は要約・修正せず、そのまま抜き出してください。分割した順序は原文の出現順を保ってください。'
+    + '\n\n---原文---\n' + text;
+
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              text: { type: 'STRING' },
+              keep: { type: 'BOOLEAN', description: '意味の通る文章の塊で、メモに残す価値があるならtrue。ページ番号やノイズ・断片ならfalse' }
+            },
+            required: ['text', 'keep']
+          }
+        }
+      }
+    })
+  });
+  const json = await res.json();
+  if (!res.ok || json.error) {
+    throw new Error((json.error && json.error.message) || `HTTP ${res.status}`);
+  }
+  const raw = json.candidates && json.candidates[0] && json.candidates[0].content
+    && json.candidates[0].content.parts && json.candidates[0].content.parts[0]
+    && json.candidates[0].content.parts[0].text;
+  if (!raw) throw new Error('応答が空です');
+  const segments = JSON.parse(raw);
+  if (!Array.isArray(segments) || segments.length === 0) throw new Error('解析結果が空です');
+  return segments;
+}
+
 async function runOCRAndInsert(dataURL) {
   showToast('文字を読み取っています…（初回は少し時間がかかります）');
   try {
-    const apiKey = getOcrApiKey();
-    let text;
-    if (apiKey) {
-      text = await recognizeWithCloudVision(dataURL, apiKey);
-    } else {
-      const worker = await getOcrWorker();
-      const { data } = await worker.recognize(dataURL);
-      text = data.text;
-    }
+    const text = await recognizeText(dataURL);
     const cleaned = text.trim();
-    if (cleaned) {
-      insertAtCursor(editor, '\n\n' + cleaned);
-      showToast('文字を転写しました');
-    } else {
+    if (!cleaned) {
       showToast('文字を検出できませんでした');
+      return;
     }
+
+    const geminiKey = getGeminiApiKey();
+    if (geminiKey) {
+      try {
+        showToast('文章を整理しています…');
+        const segments = await segmentTextWithGemini(cleaned, geminiKey);
+        openReviewSheet(segments);
+        return;
+      } catch (err) {
+        console.error('Gemini segmentation error:', err);
+        showToast('文章の整理に失敗したため、そのまま挿入します');
+      }
+    }
+
+    insertAtCursor(editor, '\n\n' + cleaned);
+    showToast('文字を転写しました');
   } catch (err) {
     console.error('OCR error:', err);
     const detail = (err && (err.message || err.toString())) || '不明なエラー';
     showToast('文字認識に失敗しました: ' + detail);
   }
 }
+
+/* ==================================================
+   OCR結果レビューシート
+   Geminiが仕分けした「文章の塊」「不要な断片」を一覧表示し、
+   メモに残したい部分だけ選んで「ペースト」できるようにする。
+   ================================================== */
+const reviewOverlay = document.getElementById('reviewOverlay');
+const reviewSheet = document.getElementById('reviewSheet');
+const reviewList = document.getElementById('reviewList');
+const reviewCancelBtn = document.getElementById('reviewCancelBtn');
+const reviewPasteBtn = document.getElementById('reviewPasteBtn');
+let reviewSegments = [];
+
+function openReviewSheet(segments) {
+  reviewSegments = segments;
+  reviewList.innerHTML = '';
+  segments.forEach((seg, i) => {
+    const row = document.createElement('label');
+    row.className = 'review-item' + (seg.keep ? '' : ' noise');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = !!seg.keep;
+    checkbox.dataset.index = i;
+    const textSpan = document.createElement('span');
+    textSpan.className = 'review-item-text';
+    textSpan.textContent = seg.text;
+    row.appendChild(checkbox);
+    row.appendChild(textSpan);
+    reviewList.appendChild(row);
+  });
+  reviewOverlay.classList.add('show');
+  reviewSheet.classList.add('show');
+}
+function closeReviewSheet() {
+  reviewOverlay.classList.remove('show');
+  reviewSheet.classList.remove('show');
+}
+reviewCancelBtn.addEventListener('click', closeReviewSheet);
+reviewOverlay.addEventListener('click', (e) => { if (e.target === reviewOverlay) closeReviewSheet(); });
+reviewPasteBtn.addEventListener('click', () => {
+  const checkedTexts = [...reviewList.querySelectorAll('input[type="checkbox"]:checked')]
+    .map(cb => reviewSegments[Number(cb.dataset.index)].text);
+  closeReviewSheet();
+  if (checkedTexts.length) {
+    insertAtCursor(editor, '\n\n' + checkedTexts.join('\n\n'));
+    showToast('選択した部分を貼り付けました');
+  }
+});
 
 function renderPhotoRow(dataURL) {
   photoRow.innerHTML = '';
