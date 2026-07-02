@@ -145,6 +145,18 @@
   .confirm-btn.destructive { color: #ff3b30; font-weight: 600; }
   .confirm-btn.affirmative { color: #007AFF; font-weight: 600; }
 
+  /* --- Settings dialog (OCR APIキー) --- */
+  .settings-box { max-width: 300px; }
+  .settings-body { padding: 18px 16px 16px; text-align: left; }
+  .settings-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  .settings-desc { font-size: 12px; color: #6e6e73; line-height: 1.5; margin-bottom: 12px; }
+  .settings-input {
+    width: 100%; padding: 10px 12px; font-size: 15px;
+    border: 1px solid #d1d1d6; border-radius: 8px;
+    background: #fff; color: #1c1c1e; font-family: inherit;
+  }
+  .settings-input:focus { outline: none; border-color: #007AFF; }
+
   /* --- Photo attach (in sheet) --- */
   .photo-row {
     display: flex; align-items: center; gap: 10px;
@@ -207,6 +219,7 @@
     <div style="width:60px"></div>
     <div class="nav-title">メモ</div>
     <div class="nav-actions">
+      <button class="icon-btn" id="settingsBtn" title="文字認識の設定">⚙</button>
       <button class="icon-btn" id="exportBtn" title="エクスポート">⇩</button>
       <button class="icon-btn primary" id="addBtn" title="新規メモ">＋</button>
     </div>
@@ -240,6 +253,20 @@
       <div class="confirm-actions">
         <button class="confirm-btn cancel" id="confirmCancelBtn">キャンセル</button>
         <button class="confirm-btn" id="confirmOkBtn">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="confirm-overlay" id="settingsOverlay">
+    <div class="confirm-box settings-box">
+      <div class="settings-body">
+        <div class="settings-title">文字認識の設定</div>
+        <div class="settings-desc">Google Cloud VisionのAPIキーを入力すると、写真からの文字認識精度が向上します。未入力の場合は無料のTesseract（標準）を使用します。キーはこの端末にのみ保存され、送信先はGoogleのみです。</div>
+        <input type="text" class="settings-input" id="ocrApiKeyInput" placeholder="APIキーを入力（任意）" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+      <div class="confirm-actions">
+        <button class="confirm-btn cancel" id="settingsCancelBtn">キャンセル</button>
+        <button class="confirm-btn affirmative" id="settingsSaveBtn">保存</button>
       </div>
     </div>
   </div>
@@ -395,6 +422,44 @@ function showConfirmDialog({ message, okLabel = 'OK', cancelLabel = 'キャン�
     confirmOverlay.addEventListener('click', onOverlay);
   });
 }
+
+/* ==================================================
+   OCR設定（クラウドAPIキー）
+   未設定の場合はTesseract.js（無料・端末内処理）を使う。
+   設定済みの場合はGoogle Cloud Vision APIで高精度に認識する。
+   APIキーはこの端末のlocalStorageにのみ保存し、リポジトリやサーバーには送信しない。
+   ================================================== */
+const OCR_API_KEY_STORAGE_KEY = 'ocrApiKey';
+function getOcrApiKey() {
+  return localStorage.getItem(OCR_API_KEY_STORAGE_KEY) || '';
+}
+function setOcrApiKey(key) {
+  if (key) localStorage.setItem(OCR_API_KEY_STORAGE_KEY, key);
+  else localStorage.removeItem(OCR_API_KEY_STORAGE_KEY);
+}
+
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsOverlay = document.getElementById('settingsOverlay');
+const ocrApiKeyInput = document.getElementById('ocrApiKeyInput');
+const settingsCancelBtn = document.getElementById('settingsCancelBtn');
+const settingsSaveBtn = document.getElementById('settingsSaveBtn');
+
+function openSettings() {
+  ocrApiKeyInput.value = getOcrApiKey();
+  settingsOverlay.classList.add('show');
+  setTimeout(() => ocrApiKeyInput.focus(), 200);
+}
+function closeSettings() {
+  settingsOverlay.classList.remove('show');
+}
+settingsBtn.addEventListener('click', openSettings);
+settingsCancelBtn.addEventListener('click', closeSettings);
+settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
+settingsSaveBtn.addEventListener('click', () => {
+  setOcrApiKey(ocrApiKeyInput.value.trim());
+  closeSettings();
+  showToast('設定を保存しました');
+});
 
 /* ==================================================
    List rendering
@@ -597,11 +662,43 @@ async function getOcrWorker() {
   return ocrWorker;
 }
 
+/**
+ * Google Cloud Vision APIで文字認識する（ユーザー自身のAPIキーを使用）。
+ * DOCUMENT_TEXT_DETECTIONはTesseractより精度が高く、縦書き日本語にも強い。
+ */
+async function recognizeWithCloudVision(dataURL, apiKey) {
+  const base64 = dataURL.split(',')[1];
+  const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{
+        image: { content: base64 },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+        imageContext: { languageHints: ['ja'] }
+      }]
+    })
+  });
+  const json = await res.json();
+  const apiError = json.responses && json.responses[0] && json.responses[0].error;
+  if (!res.ok || apiError) {
+    throw new Error((apiError && apiError.message) || `HTTP ${res.status}`);
+  }
+  return (json.responses[0].fullTextAnnotation && json.responses[0].fullTextAnnotation.text) || '';
+}
+
 async function runOCRAndInsert(dataURL) {
   showToast('文字を読み取っています…（初回は少し時間がかかります）');
   try {
-    const worker = await getOcrWorker();
-    const { data: { text } } = await worker.recognize(dataURL);
+    const apiKey = getOcrApiKey();
+    let text;
+    if (apiKey) {
+      text = await recognizeWithCloudVision(dataURL, apiKey);
+    } else {
+      const worker = await getOcrWorker();
+      const { data } = await worker.recognize(dataURL);
+      text = data.text;
+    }
     const cleaned = text.trim();
     if (cleaned) {
       insertAtCursor(editor, '\n\n' + cleaned);
