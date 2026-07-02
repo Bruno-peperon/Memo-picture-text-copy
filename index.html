@@ -288,11 +288,11 @@
     <div class="confirm-box settings-box">
       <div class="settings-body">
         <div class="settings-title">文字認識・文章整理の設定</div>
-        <div class="settings-desc">Google Cloud VisionのAPIキーを入力すると、写真からの文字認識精度が向上します。未入力の場合は無料のTesseract（標準）を使用します。</div>
-        <input type="text" class="settings-input" id="ocrApiKeyInput" placeholder="Cloud Vision APIキー（任意）" autocapitalize="off" autocorrect="off" spellcheck="false">
-
-        <div class="settings-desc" style="margin-top:16px;">GeminiのAPIキーを入力すると、読み取った文字を「文章の塊」と「不要な断片」に自動で仕分けし、必要な部分だけ選んでメモに貼り付けられるようになります。未入力の場合は読み取った文字をそのまま挿入します。</div>
+        <div class="settings-desc">Gemini APIキーを入力すると、写真の文字を直接読み取り、「文章の塊」と「不要な断片（ページ番号など）」に自動で仕分けたうえで、必要な部分だけ選んでメモに貼り付けられるようになります（推奨）。</div>
         <input type="text" class="settings-input" id="geminiApiKeyInput" placeholder="Gemini APIキー（任意）" autocapitalize="off" autocorrect="off" spellcheck="false">
+
+        <div class="settings-desc" style="margin-top:16px;">Google Cloud VisionのAPIキーは、Geminiキーが未設定のときのみ使われる予備の文字認識手段です（仕分け機能はありません）。どちらも未入力の場合は無料のTesseract（標準）を使用します。</div>
+        <input type="text" class="settings-input" id="ocrApiKeyInput" placeholder="Cloud Vision APIキー（任意・予備）" autocapitalize="off" autocorrect="off" spellcheck="false">
 
         <div class="settings-desc" style="margin-top:12px;">キーはこの端末にのみ保存され、それぞれの発行元（Google）以外には送信されません。</div>
       </div>
@@ -502,7 +502,7 @@ function openSettings() {
   ocrApiKeyInput.value = getOcrApiKey();
   geminiApiKeyInput.value = getGeminiApiKey();
   settingsOverlay.classList.add('show');
-  setTimeout(() => ocrApiKeyInput.focus(), 200);
+  setTimeout(() => geminiApiKeyInput.focus(), 200);
 }
 function closeSettings() {
   settingsOverlay.classList.remove('show');
@@ -754,21 +754,30 @@ async function recognizeText(dataURL) {
 }
 
 /**
- * GeminiでOCR結果を「文章の塊」と「不要な断片」（ページ番号・ヘッダー等）に仕分けする。
- * 原文の文字列は変えず、そのまま抜き出させる。
+ * Geminiに画像を直接渡し、「文字の書き起こし」と「文章の塊／不要な断片への仕分け」を
+ * 1回のリクエストで行う。Cloud Visionを介さずGeminiだけでOCRが完結する。
  */
-async function segmentTextWithGemini(text, apiKey) {
-  const prompt = 'あなたはOCRで読み取ったテキストを整理するアシスタントです。'
-    + '以下の原文を、意味のあるまとまり（段落や文の塊）ごとに分割してください。'
-    + 'ページ番号・柱（ヘッダーやフッター）・OCRの誤読によるゴミ文字列など、メモとして残す価値がない断片も1つの要素として含めてください。'
-    + '原文の文字列は要約・修正せず、そのまま抜き出してください。分割した順序は原文の出現順を保ってください。'
-    + '\n\n---原文---\n' + text;
+async function recognizeAndSegmentWithGemini(dataURL, apiKey) {
+  const commaIndex = dataURL.indexOf(',');
+  const mimeType = dataURL.slice(5, dataURL.indexOf(';'));
+  const base64 = dataURL.slice(commaIndex + 1);
+
+  const prompt = 'この画像に写っている文字をすべて書き起こしてください。誤字の訂正・要約・翻訳はせず、原文の文字をそのまま書き起こしてください。'
+    + '縦書きの場合は右から左、上から下という自然な読み順に従ってください。'
+    + '書き起こした内容を、意味のあるまとまり（段落や文の塊）ごとに分割し、出現順を保ったままJSON配列として出力してください。'
+    + 'ページ番号・柱（ヘッダーやフッター）・写り込みなど、メモとして残す価値がない断片も1つの要素として含めてください。'
+    + '文字が読み取れない場合は空の配列を返してください。';
 
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
+      contents: [{
+        parts: [
+          { text: prompt },
+          { inlineData: { mimeType, data: base64 } }
+        ]
+      }],
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -794,35 +803,34 @@ async function segmentTextWithGemini(text, apiKey) {
     && json.candidates[0].content.parts[0].text;
   if (!raw) throw new Error('応答が空です');
   const segments = JSON.parse(raw);
-  if (!Array.isArray(segments) || segments.length === 0) throw new Error('解析結果が空です');
+  if (!Array.isArray(segments) || segments.length === 0) throw new Error('文字を検出できませんでした');
   return segments;
 }
 
 async function runOCRAndInsert(dataURL) {
   showToast('文字を読み取っています…（初回は少し時間がかかります）');
   try {
-    const text = await recognizeText(dataURL);
-    const cleaned = text.trim();
-    if (!cleaned) {
-      showToast('文字を検出できませんでした');
-      return;
-    }
-
     const geminiKey = getGeminiApiKey();
     if (geminiKey) {
       try {
-        showToast('文章を整理しています…');
-        const segments = await segmentTextWithGemini(cleaned, geminiKey);
+        const segments = await recognizeAndSegmentWithGemini(dataURL, geminiKey);
         openReviewSheet(segments);
         return;
       } catch (err) {
-        console.error('Gemini segmentation error:', err);
-        showToast('文章の整理に失敗したため、そのまま挿入します');
+        console.error('Gemini OCR error:', err);
+        const detail = (err && (err.message || err.toString())) || '不明なエラー';
+        showToast('Geminiでの読み取りに失敗したため、他の方法で再試行します: ' + detail);
       }
     }
 
-    insertAtCursor(editor, '\n\n' + cleaned);
-    showToast('文字を転写しました');
+    const text = await recognizeText(dataURL);
+    const cleaned = text.trim();
+    if (cleaned) {
+      insertAtCursor(editor, '\n\n' + cleaned);
+      showToast('文字を転写しました');
+    } else {
+      showToast('文字を検出できませんでした');
+    }
   } catch (err) {
     console.error('OCR error:', err);
     const detail = (err && (err.message || err.toString())) || '不明なエラー';
