@@ -821,7 +821,16 @@ async function runOCRAndInsert(dataURL) {
         return;
       } catch (err) {
         console.error('Gemini segmentation error:', err);
-        showToast('文章の整理に失敗したため、そのまま挿入します');
+        const detail = (err && (err.message || err.toString())) || '';
+        const hint = /quota|429/i.test(detail)
+          ? 'Geminiの利用上限に達している可能性があります。設定画面のAPIキーの利用状況をご確認ください。'
+          : '';
+        await showConfirmDialog({
+          message: ['文章の整理に失敗したため、読み取った文字をそのまま挿入します。', hint].filter(Boolean).join('\n'),
+          okLabel: 'OK',
+          cancelLabel: '閉じる',
+          destructive: false
+        });
       }
     }
 
