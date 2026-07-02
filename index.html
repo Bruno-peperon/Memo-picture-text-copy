@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>メモ</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #f2f2f7;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+    color: #1c1c1e;
+    -webkit-text-size-adjust: 100%;
+  }
+  #app { min-height: 100vh; display: flex; flex-direction: column; }
+
+  /* --- Nav bar --- */
+  .nav-bar {
+    position: sticky; top: 0; z-index: 20;
+    height: calc(52px + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
+    display: flex; align-items: center; justify-content: space-between;
+    padding-left: 16px; padding-right: 16px;
+    background: rgba(242,242,247,0.94);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+  }
+  .nav-title { font-size: 17px; font-weight: 600; }
+  .nav-actions { display: flex; align-items: center; gap: 10px; }
+  .icon-btn {
+    width: 30px; height: 30px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    border: none; cursor: pointer; font-size: 15px;
+    background: #e5e5ea; color: #1c1c1e;
+  }
+  .icon-btn.primary { background: #007AFF; color: #fff; font-size: 18px; }
+  .icon-btn:active { opacity: 0.7; }
+
+  /* --- Month jump strip --- */
+  .month-strip {
+    display: flex; gap: 8px; overflow-x: auto;
+    padding: 10px 16px; background: #f2f2f7;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    -webkit-overflow-scrolling: touch;
+  }
+  .month-chip {
+    flex-shrink: 0; padding: 6px 12px; border-radius: 14px;
+    background: #e5e5ea; font-size: 13px; color: #3a3a3c;
+    border: none; white-space: nowrap; cursor: pointer;
+  }
+  .month-chip.active { background: #007AFF; color: #fff; }
+
+  /* --- List --- */
+  .list { flex: 1; padding: 12px 0 40px; }
+  .section-header {
+    font-size: 13px; font-weight: 600; color: #6e6e73;
+    padding: 14px 16px 6px;
+  }
+  .memo-row {
+    background: #fff; margin: 0 16px 10px; padding: 12px 40px 12px 14px;
+    border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    position: relative; cursor: pointer;
+  }
+  .memo-text { font-size: 15px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .memo-meta { margin-top: 6px; font-size: 12px; color: #8e8e93; }
+  .memo-del {
+    position: absolute; top: 10px; right: 10px;
+    width: 22px; height: 22px; border-radius: 50%; border: none;
+    background: #f2f2f7; color: #ff3b30; font-size: 13px; cursor: pointer;
+  }
+  .empty-state {
+    text-align: center; color: #8e8e93; font-size: 14px;
+    margin-top: 80px; padding: 0 40px; line-height: 1.6;
+  }
+
+  /* --- Sheet (add / edit memo) --- */
+  .sheet-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.25);
+    opacity: 0; pointer-events: none; transition: opacity 0.25s; z-index: 90;
+  }
+  .sheet-overlay.show { opacity: 1; pointer-events: auto; }
+  .sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; height: 80vh;
+    background: #f2f2f7; border-radius: 20px 20px 0 0;
+    transform: translateY(100%); transition: transform 0.3s cubic-bezier(.32,.72,0,1);
+    z-index: 100; display: flex; flex-direction: column; overflow: hidden;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .sheet.show { transform: translateY(0); }
+  .sheet-nav {
+    height: 52px; flex-shrink: 0; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 16px;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+  }
+  .sheet-title { font-size: 17px; font-weight: 600; }
+  .nav-text-btn { background: none; border: none; color: #007AFF; font-size: 17px; padding: 4px 6px; cursor: pointer; }
+  .nav-text-btn:disabled { color: #b3d7ff; }
+  .nav-text-btn.bold { font-weight: 600; }
+  .editor {
+    flex: 1; padding: 16px; font-size: 16px; line-height: 1.6;
+    border: none; outline: none; background: transparent; resize: none;
+    color: #1c1c1e; font-family: inherit;
+  }
+  .editor::placeholder { color: #b8b8bd; }
+
+  /* --- Confirm dialog (汎用: 削除確認・OCR確認の両方に使う) --- */
+  .confirm-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 300;
+    padding: 20px;
+  }
+  .confirm-overlay.show { opacity: 1; pointer-events: auto; }
+  .confirm-box {
+    width: 100%; max-width: 270px;
+    background: rgba(242,242,247,0.98);
+    border-radius: 14px;
+    overflow: hidden;
+    text-align: center;
+    transform: scale(0.9);
+    transition: transform 0.2s;
+  }
+  .confirm-overlay.show .confirm-box { transform: scale(1); }
+  .confirm-message {
+    padding: 20px 16px;
+    font-size: 15px;
+    color: #1c1c1e;
+    line-height: 1.5;
+    white-space: pre-line;
+  }
+  .confirm-actions {
+    display: flex;
+    border-top: 1px solid rgba(0,0,0,0.1);
+  }
+  .confirm-btn {
+    flex: 1; padding: 12px 0; font-size: 17px;
+    background: none; border: none; cursor: pointer;
+  }
+  .confirm-btn.cancel {
+    color: #007AFF;
+    border-right: 1px solid rgba(0,0,0,0.1);
+  }
+  .confirm-btn.destructive { color: #ff3b30; font-weight: 600; }
+  .confirm-btn.affirmative { color: #007AFF; font-weight: 600; }
+
+  /* --- Photo attach (in sheet) --- */
+  .photo-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px;
+    border-top: 1px solid rgba(0,0,0,0.08);
+  }
+  .photo-add-btn {
+    display: flex; align-items: center; gap: 6px;
+    background: #e5e5ea; border: none; border-radius: 10px;
+    padding: 8px 12px; font-size: 14px; color: #1c1c1e; cursor: pointer;
+  }
+  .photo-preview-wrap {
+    position: relative; width: 54px; height: 54px; flex-shrink: 0;
+  }
+  .photo-preview-wrap img {
+    width: 100%; height: 100%; object-fit: cover; border-radius: 10px; cursor: pointer;
+  }
+  .photo-remove {
+    position: absolute; top: -6px; right: -6px;
+    width: 20px; height: 20px; border-radius: 50%; border: none;
+    background: #ff3b30; color: #fff; font-size: 11px; line-height: 1; cursor: pointer;
+  }
+  .photo-hint { font-size: 13px; color: #6e6e73; }
+
+  /* --- Photo thumbnail in memo row --- */
+  .memo-photo {
+    margin-top: 8px;
+    width: 100%; max-width: 220px; max-height: 160px;
+    object-fit: cover; border-radius: 10px; display: block;
+  }
+
+  /* --- Fullscreen viewer --- */
+  .viewer-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.92);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 400;
+  }
+  .viewer-overlay.show { opacity: 1; pointer-events: auto; }
+  .viewer-overlay img { max-width: 92%; max-height: 80%; border-radius: 8px; }
+  .viewer-close {
+    position: absolute; top: calc(16px + env(safe-area-inset-top)); right: 16px;
+    width: 34px; height: 34px; border-radius: 50%;
+    background: rgba(255,255,255,0.15); color: #fff; border: none;
+    font-size: 16px; cursor: pointer;
+  }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%) translateY(20px);
+    background: rgba(28,28,30,0.9); color: #fff; padding: 10px 18px; border-radius: 12px;
+    font-size: 13px; opacity: 0; pointer-events: none; transition: all 0.25s; z-index: 200;
+    max-width: 80vw; text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="nav-bar">
+    <div style="width:60px"></div>
+    <div class="nav-title">メモ</div>
+    <div class="nav-actions">
+      <button class="icon-btn" id="exportBtn" title="エクスポート">⇩</button>
+      <button class="icon-btn primary" id="addBtn" title="新規メモ">＋</button>
+    </div>
+  </div>
+
+  <div class="month-strip" id="monthStrip"></div>
+
+  <div class="list" id="list"></div>
+
+  <div class="sheet-overlay" id="overlay"></div>
+  <div class="sheet" id="sheet">
+    <div class="sheet-nav">
+      <button class="nav-text-btn" id="cancelBtn">キャンセル</button>
+      <div class="sheet-title" id="sheetTitle">新規メモ</div>
+      <button class="nav-text-btn bold" id="doneBtn" disabled>完了</button>
+    </div>
+    <textarea class="editor" id="editor" placeholder="ここに入力…"></textarea>
+    <div class="photo-row" id="photoRow"></div>
+  </div>
+
+  <div class="viewer-overlay" id="viewerOverlay">
+    <button class="viewer-close" id="viewerCloseBtn">✕</button>
+    <img id="viewerImg" src="" alt="">
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="confirm-overlay" id="confirmOverlay">
+    <div class="confirm-box">
+      <div class="confirm-message" id="confirmMessage"></div>
+      <div class="confirm-actions">
+        <button class="confirm-btn cancel" id="confirmCancelBtn">キャンセル</button>
+        <button class="confirm-btn" id="confirmOkBtn">OK</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ==================================================
+   IndexedDB layer
+   画像は Blob ではなく base64文字列（dataURL）として保存する。
+   Safari(WebKit)はIndexedDB内のBlobデータの扱いに既知の不具合が
+   複数報告されているため、文字列として保存する方式に統一している。
+   ================================================== */
+const DB_NAME = 'memoAppDB';
+const STORE = 'memos';
+let db;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = (e) => {
+      const database = e.target.result;
+      if (!database.objectStoreNames.contains(STORE)) {
+        const store = database.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+        store.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function addMemoToDB(text, imageDataURL) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const memo = { text, image: imageDataURL || null, createdAt: new Date().toISOString() };
+    const req = store.add(memo);
+    req.onsuccess = () => resolve();
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function updateMemoInDB(id, text, imageDataURL) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const getReq = store.get(id);
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      if (!existing) { reject(new Error('memo not found')); return; }
+      existing.text = text;
+      existing.image = imageDataURL || null; // 作成日時(createdAt)は変更しない。編集で月別グループが移動しないようにするため
+      const putReq = store.put(existing);
+      putReq.onsuccess = () => resolve();
+      putReq.onerror = (e) => reject(e.target.error);
+    };
+    getReq.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function getAllMemosFromDB() {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const store = tx.objectStore(STORE);
+    const req = store.getAll();
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function deleteMemoFromDB(id) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const req = store.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+/* ==================================================
+   App state / DOM refs
+   ================================================== */
+let memos = [];
+let activeMonthKey = null; // null = すべて表示
+let editingMemoId = null;  // null = 新規作成モード、数値 = 編集モード
+let selectedImageDataURL = null;
+
+const list = document.getElementById('list');
+const monthStrip = document.getElementById('monthStrip');
+const addBtn = document.getElementById('addBtn');
+const exportBtn = document.getElementById('exportBtn');
+const overlay = document.getElementById('overlay');
+const sheet = document.getElementById('sheet');
+const sheetTitle = document.getElementById('sheetTitle');
+const cancelBtn = document.getElementById('cancelBtn');
+const doneBtn = document.getElementById('doneBtn');
+const editor = document.getElementById('editor');
+const photoRow = document.getElementById('photoRow');
+const toastEl = document.getElementById('toast');
+
+function showToast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  setTimeout(() => toastEl.classList.remove('show'), 1800);
+}
+
+function monthKey(dateStr) {
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function monthLabel(key) {
+  const [y, m] = key.split('-');
+  return `${y}年${Number(m)}月`;
+}
+function formatDateTime(dateStr) {
+  const d = new Date(dateStr);
+  return d.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) + ' ' +
+         d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+}
+
+/* ==================================================
+   汎用確認ダイアログ
+   window.confirm()の代わりに使う独自ポップアップ。
+   削除確認・OCR転写確認の両方をこの1つの関数で共通化している。
+   ================================================== */
+const confirmOverlay = document.getElementById('confirmOverlay');
+const confirmMessage = document.getElementById('confirmMessage');
+const confirmCancelBtn = document.getElementById('confirmCancelBtn');
+const confirmOkBtn = document.getElementById('confirmOkBtn');
+
+function showConfirmDialog({ message, okLabel = 'OK', cancelLabel = 'キャンセル', destructive = false }) {
+  return new Promise((resolve) => {
+    confirmMessage.textContent = message;
+    confirmOkBtn.textContent = okLabel;
+    confirmOkBtn.className = 'confirm-btn ' + (destructive ? 'destructive' : 'affirmative');
+    confirmCancelBtn.textContent = cancelLabel;
+    confirmOverlay.classList.add('show');
+
+    function cleanup(result) {
+      confirmOverlay.classList.remove('show');
+      confirmOkBtn.removeEventListener('click', onOk);
+      confirmCancelBtn.removeEventListener('click', onCancel);
+      confirmOverlay.removeEventListener('click', onOverlay);
+      resolve(result);
+    }
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    function onOverlay(e) { if (e.target === confirmOverlay) cleanup(false); }
+
+    confirmOkBtn.addEventListener('click', onOk);
+    confirmCancelBtn.addEventListener('click', onCancel);
+    confirmOverlay.addEventListener('click', onOverlay);
+  });
+}
+
+/* ==================================================
+   List rendering
+   ================================================== */
+async function loadMemos() {
+  memos = await getAllMemosFromDB();
+  memos.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  renderMonthStrip();
+  renderList();
+}
+
+function renderMonthStrip() {
+  const keys = [...new Set(memos.map(m => monthKey(m.createdAt)))];
+  monthStrip.innerHTML = '';
+
+  const allChip = document.createElement('button');
+  allChip.className = 'month-chip' + (activeMonthKey === null ? ' active' : '');
+  allChip.textContent = 'すべて';
+  allChip.onclick = () => { activeMonthKey = null; renderMonthStrip(); renderList(); };
+  monthStrip.appendChild(allChip);
+
+  keys.forEach(key => {
+    const chip = document.createElement('button');
+    chip.className = 'month-chip' + (activeMonthKey === key ? ' active' : '');
+    chip.textContent = monthLabel(key);
+    chip.onclick = () => { activeMonthKey = key; renderMonthStrip(); renderList(); };
+    monthStrip.appendChild(chip);
+  });
+}
+
+function renderList() {
+  list.innerHTML = '';
+  const filtered = activeMonthKey
+    ? memos.filter(m => monthKey(m.createdAt) === activeMonthKey)
+    : memos;
+
+  if (filtered.length === 0) {
+    list.innerHTML = `<div class="empty-state">まだメモがありません<br>右上の＋から追加してください</div>`;
+    return;
+  }
+
+  let lastKey = null;
+  filtered.forEach(memo => {
+    const key = monthKey(memo.createdAt);
+    if (key !== lastKey) {
+      const header = document.createElement('div');
+      header.className = 'section-header';
+      header.textContent = monthLabel(key);
+      list.appendChild(header);
+      lastKey = key;
+    }
+
+    const row = document.createElement('div');
+    row.className = 'memo-row';
+    row.dataset.id = memo.id;
+    row.innerHTML = `
+      <button class="memo-del" data-id="${memo.id}">✕</button>
+      <div class="memo-text"></div>
+    `;
+    row.querySelector('.memo-text').textContent = memo.text;
+
+    if (memo.image) {
+      const img = document.createElement('img');
+      img.className = 'memo-photo';
+      img.src = memo.image; // すでにdataURL文字列なのでそのまま使える
+      img.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openViewer(memo.image);
+      });
+      row.appendChild(img);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'memo-meta';
+    meta.textContent = formatDateTime(memo.createdAt);
+    row.appendChild(meta);
+
+    list.appendChild(row);
+  });
+}
+
+list.addEventListener('click', async (e) => {
+  if (e.target.classList.contains('memo-del')) {
+    e.stopPropagation();
+    const id = Number(e.target.dataset.id);
+    const ok = await showConfirmDialog({
+      message: 'このメモを削除しますか？\nこの操作は取り消せません。',
+      okLabel: '削除',
+      cancelLabel: 'キャンセル',
+      destructive: true
+    });
+    if (ok) {
+      await deleteMemoFromDB(id);
+      await loadMemos();
+      showToast('削除しました');
+    }
+    return;
+  }
+  const row = e.target.closest('.memo-row');
+  if (row) {
+    const memo = memos.find(m => m.id === Number(row.dataset.id));
+    if (memo) openSheet(memo); // メモ本体タップ → 編集モードでシートを開く
+  }
+});
+
+/* ==================================================
+   Fullscreen photo viewer
+   ================================================== */
+const viewerOverlay = document.getElementById('viewerOverlay');
+const viewerImg = document.getElementById('viewerImg');
+const viewerCloseBtn = document.getElementById('viewerCloseBtn');
+function openViewer(src) {
+  viewerImg.src = src;
+  viewerOverlay.classList.add('show');
+}
+function closeViewer() {
+  viewerOverlay.classList.remove('show');
+}
+viewerCloseBtn.addEventListener('click', closeViewer);
+viewerOverlay.addEventListener('click', (e) => {
+  if (e.target === viewerOverlay) closeViewer();
+});
+
+/* ==================================================
+   Photo picker + OCR
+   ================================================== */
+/**
+ * OCR専用の画像を用意する。
+ * 保存用（1200px）よりも大きい解像度（長辺2000px）を使うことで、
+ * 新聞や書籍のような細かい文字の認識精度を上げる。
+ */
+function resizeImageForOCR(file, maxDim = 2000, quality = 0.92) {
+  return resizeImage(file, maxDim, quality);
+}
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * 写真を保存前に縮小・圧縮する。
+ * iPhoneのカメラ写真は数MB〜10MB程度になることがあり、そのままbase64で
+ * 保存・表示しようとすると失敗しやすいため、長辺1200pxまで縮小してJPEG品質0.7で
+ * 再圧縮してから使用する。
+ */
+function resizeImage(file, maxDim = 1200, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round(height * (maxDim / width));
+          width = maxDim;
+        } else {
+          width = Math.round(width * (maxDim / height));
+          height = maxDim;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(objectUrl);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = (err) => {
+      URL.revokeObjectURL(objectUrl);
+      reject(err);
+    };
+    img.src = objectUrl;
+  });
+}
+
+function insertAtCursor(textarea, text) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end = textarea.selectionEnd ?? textarea.value.length;
+  textarea.value = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+  const newPos = start + text.length;
+  textarea.selectionStart = textarea.selectionEnd = newPos;
+  doneBtn.disabled = editor.value.trim().length === 0;
+}
+
+let ocrWorker = null;
+async function getOcrWorker() {
+  // Tesseract.jsのワーカーは初回のみ作成し、以後は使い回す（毎回作り直すと遅い）
+  if (!ocrWorker) {
+    ocrWorker = await Tesseract.createWorker('jpn+eng');
+  }
+  return ocrWorker;
+}
+
+async function runOCRAndInsert(dataURL) {
+  showToast('文字を読み取っています…（初回は少し時間がかかります）');
+  try {
+    const worker = await getOcrWorker();
+    const { data: { text } } = await worker.recognize(dataURL);
+    const cleaned = text.trim();
+    if (cleaned) {
+      insertAtCursor(editor, '\n\n' + cleaned);
+      showToast('文字を転写しました');
+    } else {
+      showToast('文字を検出できませんでした');
+    }
+  } catch (err) {
+    console.error('OCR error:', err);
+    const detail = (err && (err.message || err.toString())) || '不明なエラー';
+    showToast('文字認識に失敗しました: ' + detail);
+  }
+}
+
+function renderPhotoRow(dataURL) {
+  photoRow.innerHTML = '';
+
+  if (dataURL) {
+    const wrap = document.createElement('div');
+    wrap.className = 'photo-preview-wrap';
+    wrap.innerHTML = `<img src="${dataURL}" alt=""><button class="photo-remove">✕</button>`;
+    wrap.querySelector('img').addEventListener('click', () => openViewer(dataURL));
+    wrap.querySelector('.photo-remove').addEventListener('click', () => {
+      selectedImageDataURL = null;
+      renderPhotoRow(null);
+    });
+    photoRow.appendChild(wrap);
+
+    const hint = document.createElement('span');
+    hint.className = 'photo-hint';
+    hint.textContent = '写真が添付されています（タップで拡大）';
+    photoRow.appendChild(hint);
+  } else {
+    const btn = document.createElement('button');
+    btn.className = 'photo-add-btn';
+    btn.textContent = '📷 写真を追加';
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.style.display = 'none';
+
+    btn.addEventListener('click', () => input.click());
+    input.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      showToast('写真を処理しています…');
+      let dataURL;
+      try {
+        dataURL = await resizeImage(file);
+      } catch (err) {
+        console.error('resizeImage failed, falling back to raw file', err);
+        try {
+          dataURL = await fileToDataURL(file); // 縮小に失敗した場合は元データをそのまま使う
+        } catch (err2) {
+          console.error(err2);
+          showToast('写真の読み込みに失敗しました');
+          return;
+        }
+      }
+
+      selectedImageDataURL = dataURL;
+      renderPhotoRow(dataURL);
+
+      const wantsOcr = await showConfirmDialog({
+        message: '写真内のテキストを読み込んでメモに転写しますか？',
+        okLabel: 'はい',
+        cancelLabel: 'いいえ',
+        destructive: false
+      });
+      if (wantsOcr) {
+        let ocrImage;
+        try {
+          ocrImage = await resizeImageForOCR(file); // 保存用より高解像度の画像で認識精度を上げる
+        } catch (err) {
+          console.error('resizeImageForOCR failed, using stored image instead', err);
+          ocrImage = dataURL; // 失敗時は保存用画像で代用
+        }
+        await runOCRAndInsert(ocrImage);
+      }
+    });
+
+    photoRow.appendChild(btn);
+    photoRow.appendChild(input);
+  }
+}
+
+/* ==================================================
+   Add / Edit sheet（共通化）
+   memoを渡すと編集モード、渡さないと新規作成モードで開く
+   ================================================== */
+function openSheet(memo) {
+  if (memo) {
+    editingMemoId = memo.id;
+    sheetTitle.textContent = 'メモを編集';
+    doneBtn.textContent = '保存';
+    editor.value = memo.text;
+    selectedImageDataURL = memo.image || null;
+  } else {
+    editingMemoId = null;
+    sheetTitle.textContent = '新規メモ';
+    doneBtn.textContent = '完了';
+    editor.value = '';
+    selectedImageDataURL = null;
+  }
+  doneBtn.disabled = editor.value.trim().length === 0;
+  renderPhotoRow(selectedImageDataURL);
+
+  overlay.classList.add('show');
+  sheet.classList.add('show');
+  setTimeout(() => editor.focus(), 300);
+}
+function closeSheet() {
+  overlay.classList.remove('show');
+  sheet.classList.remove('show');
+}
+addBtn.addEventListener('click', () => openSheet(null));
+overlay.addEventListener('click', closeSheet);
+cancelBtn.addEventListener('click', closeSheet);
+editor.addEventListener('input', () => {
+  doneBtn.disabled = editor.value.trim().length === 0;
+});
+doneBtn.addEventListener('click', async () => {
+  const text = editor.value.trim();
+  if (!text) return;
+  try {
+    if (editingMemoId !== null) {
+      await updateMemoInDB(editingMemoId, text, selectedImageDataURL);
+      closeSheet();
+      await loadMemos();
+      showToast('更新しました');
+    } else {
+      await addMemoToDB(text, selectedImageDataURL);
+      closeSheet();
+      await loadMemos();
+      showToast('保存しました');
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('保存に失敗しました。写真サイズが原因の可能性があります');
+  }
+});
+
+/* ==================================================
+   Export
+   ================================================== */
+exportBtn.addEventListener('click', async () => {
+  const all = await getAllMemosFromDB();
+  all.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  const payload = JSON.stringify(all.map(m => ({ text: m.text, image: m.image, createdAt: m.createdAt })), null, 2);
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const today = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `memo-export-${today}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast('エクスポートしました');
+});
+
+/* ==================================================
+   Init
+   ================================================== */
+(async function init() {
+  try {
+    db = await openDB();
+    if (navigator.storage && navigator.storage.persist) {
+      await navigator.storage.persist();
+    }
+    await loadMemos();
+  } catch (err) {
+    console.error(err);
+    showToast('データベースの初期化に失敗しました');
+  }
+})();
+</script>
+</body>
+</html>
